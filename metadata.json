@@ -1,0 +1,5 @@
+{
+  "name": "Copy of RAG-Stream-Explain",
+  "description": "An interactive, educational visualization of a production-grade RAG pipeline featuring Kafka, Flink, Redis, and Vector Search.",
+  "requestFramePermissions": []
+}
