@@ -103,7 +103,15 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
       }
     },
     {
-      stepId: 3, node: 'router', edge: {from: 'redis', to: 'router'}, log: 'Router: Analyzing Intent',
+      stepId: 3, node: 'redis', edge: {from: 'postgres', to: 'redis'}, log: 'Redis: Hydrating Context',
+      inspectorData: { 
+        title: 'Write-Back / Hydration', 
+        description: 'Syncing retrieved history from Postgres back into Redis hot cache for low-latency access in the next processing steps.', 
+        data: { action: "SET", key: `session:${tenantId}:u_99:history`, items_synced: 10, ttl: "1h" } 
+      }
+    },
+    {
+      stepId: 4, node: 'router', edge: {from: 'redis', to: 'router'}, log: 'Router: Analyzing Intent',
       inspectorData: { 
         title: 'Semantic Router (Classification)', 
         description: 'Deciding the routing path. The model determines if the query requires Unstructured Search (Vector).', 
@@ -111,7 +119,7 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
       }
     },
     {
-      stepId: 4, node: 'retriever', edge: {from: 'router', to: 'retriever'}, log: 'Retriever: Generating HyDE Document',
+      stepId: 5, node: 'retriever', edge: {from: 'router', to: 'retriever'}, log: 'Retriever: Generating HyDE Document',
       inspectorData: { 
         title: 'HyDE Strategy', 
         description: 'Hallucinating an ideal answer to improve retrieval.', 
@@ -119,7 +127,7 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
       }
     },
     {
-      stepId: 5, node: 'embedding', edge: {from: 'retriever', to: 'embedding'}, log: 'Embedding: Vectorizing Query',
+      stepId: 6, node: 'embedding', edge: {from: 'retriever', to: 'embedding'}, log: 'Embedding: Vectorizing Query',
       inspectorData: { 
         title: 'Query Embedding', 
         description: 'Embedding the hypothetical answer to find semantically similar REAL documents.', 
@@ -127,7 +135,7 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
       }
     },
     {
-      stepId: 6, node: 'vector_db', edge: {from: 'embedding', to: 'vector_db'}, log: `Vector DB: Search`,
+      stepId: 7, node: 'vector_db', edge: {from: 'embedding', to: 'vector_db'}, log: `Vector DB: Search`,
       inspectorData: { 
         title: 'Hybrid Search', 
         description: 'Retrieving top candidates.', 
@@ -135,7 +143,7 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
       }
     },
     {
-      stepId: 7, node: 'reranker', edge: {from: 'vector_db', to: 'reranker'}, log: 'Reranker: Filtering',
+      stepId: 8, node: 'reranker', edge: {from: 'vector_db', to: 'reranker'}, log: 'Reranker: Filtering',
       inspectorData: { 
         title: 'Cross-Encoder Re-ranking', 
         description: 'Refining the top results.', 
@@ -150,7 +158,7 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
       }
     },
     {
-        stepId: 8, node: 'llm', edge: {from: 'reranker', to: 'llm'}, log: 'LLM: Generating Initial Draft',
+        stepId: 9, node: 'llm', edge: {from: 'reranker', to: 'llm'}, log: 'LLM: Generating Initial Draft',
         inspectorData: { 
           title: 'LLM Generation Start', 
           description: 'Model begins generating the answer.', 
@@ -164,7 +172,7 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
   if (isFlareEnabled) {
       flareSteps = [
         {
-            stepId: 9, node: 'retriever', edge: {from: 'llm', to: 'retriever'}, log: 'FLARE: Low Confidence Detected!',
+            stepId: 10, node: 'retriever', edge: {from: 'llm', to: 'retriever'}, log: 'FLARE: Low Confidence Detected!',
             inspectorData: { 
               title: 'FLARE Triggered (Active Retrieval)', 
               description: 'The LLM paused generation because confidence dropped below threshold for the term "sick leave days".', 
@@ -176,7 +184,7 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
             }
         },
         {
-            stepId: 10, node: 'vector_db', edge: {from: 'retriever', to: 'vector_db'}, log: 'FLARE: Targeted Retrieval',
+            stepId: 11, node: 'vector_db', edge: {from: 'retriever', to: 'vector_db'}, log: 'FLARE: Targeted Retrieval',
             inspectorData: { 
               title: 'Targeted Look-up', 
               description: 'Fetching specific data for the missing term.', 
@@ -184,7 +192,7 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
             }
         },
         {
-            stepId: 11, node: 'llm', edge: {from: 'vector_db', to: 'llm'}, log: 'LLM: Resuming Generation',
+            stepId: 12, node: 'llm', edge: {from: 'vector_db', to: 'llm'}, log: 'LLM: Resuming Generation',
             inspectorData: { 
               title: 'Generation Resumed', 
               description: 'Incorporating new evidence into the response.', 
@@ -195,7 +203,7 @@ const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: bo
   }
 
   // 5. Finalize
-  const nextStepId = 8 + (isFlareEnabled ? 3 : 0) + 1;
+  const nextStepId = 9 + (isFlareEnabled ? 3 : 0) + 1;
   const finalSteps: SimulationStepDef[] = [
     {
       stepId: nextStepId, node: 'postgres', edge: {from: 'llm', to: 'postgres'}, log: 'Postgres: Archiving',
