@@ -4,7 +4,7 @@ import DetailPanel from './components/DetailPanel';
 import DataInspector from './components/DataInspector';
 import { generateRAGResponse, generateVeoVideo } from './services/geminiService';
 import { NodeType, SimulationStepDef } from './types';
-import { Play, Database, RefreshCw, Terminal, ChevronRight, RotateCcw, Users, Image as ImageIcon, Video, Upload, Loader2 } from 'lucide-react';
+import { Play, Database, RefreshCw, Terminal, ChevronRight, RotateCcw, Users, Image as ImageIcon, Video, Upload, Loader2, Zap, RefreshCcw } from 'lucide-react';
 
 // --- Dynamic Simulation Definitions ---
 
@@ -51,90 +51,172 @@ const getIngestionSteps = (tenantId: string): SimulationStepDef[] => [
   }
 ];
 
-const getQuerySteps = (tenantId: string): SimulationStepDef[] => [
-  {
-    stepId: 0, node: 'user', log: `User (${tenantId}): Submitting vague query`,
-    inspectorData: { 
-      title: 'User Input', 
-      description: 'Raw input via API Gateway. Often ambiguous or lacking context.', 
-      data: { query: "vacation policy?", user_id: "u_99", tenant_id: tenantId } 
+const getQuerySteps = (tenantId: string, isRedisHit: boolean, isFlareEnabled: boolean): SimulationStepDef[] => {
+  // 1. Common Start
+  const baseSteps: SimulationStepDef[] = [
+    {
+      stepId: 0, node: 'user', log: `User (${tenantId}): Submitting query`,
+      inspectorData: { 
+        title: 'User Input', 
+        description: 'Raw input via API Gateway. Often ambiguous or lacking context.', 
+        data: { query: "vacation policy?", user_id: "u_99", tenant_id: tenantId } 
+      }
+    },
+    {
+      stepId: 1, node: 'redis', edge: {from: 'user', to: 'redis'}, log: 'Redis: Checking Hot Cache',
+      inspectorData: { 
+        title: 'Cache Check (Layer 1)', 
+        description: isRedisHit ? 'Cache HIT! Returning response immediately.' : 'Cache MISS. Proceeding to deep retrieval.', 
+        data: { 
+            cache_hit: isRedisHit, 
+            latency: isRedisHit ? "2ms" : "N/A", 
+            key: `chat:${tenantId}:u_99`,
+            cached_response: isRedisHit ? "Vacation policy is 20 days." : null
+        } 
+      }
     }
-  },
-  {
-    stepId: 1, node: 'redis', edge: {from: 'user', to: 'redis'}, log: 'Redis: Checking Cache & History',
-    inspectorData: { 
-      title: 'Conversation Memory', 
-      description: 'Why: To support multi-turn reasoning. Also checks Semantic Cache to save LLM costs.', 
-      data: { cache_hit: false, history_fetched_turns: 3, key: `chat:${tenantId}:u_99` } 
-    }
-  },
-  {
-    stepId: 2, node: 'retriever', edge: {from: 'redis', to: 'retriever'}, log: 'Retriever: Generating HyDE Document',
-    inspectorData: { 
-      title: 'HyDE (Hypothetical Document Embeddings)', 
-      description: 'Why: "Improves retrieval when user queries are vague." We hallucinate an ideal answer and embed THAT.', 
-      data: { method: "HyDE", hypothetical_doc: `The vacation policy for Tenant ${tenantId} typically allows 20 days...`, technique: "Query Expansion" } 
-    }
-  },
-  {
-    stepId: 3, node: 'embedding', edge: {from: 'retriever', to: 'embedding'}, log: 'Embedding: Vectorizing HyDE doc',
-    inspectorData: { 
-      title: 'Query Embedding', 
-      description: 'Embedding the hypothetical answer to find semantically similar REAL documents.', 
-      data: { target: "Hypothetical Document", vector_preview: [0.12, -0.55, 0.91] } 
-    }
-  },
-  {
-    stepId: 4, node: 'vector_db', edge: {from: 'embedding', to: 'vector_db'}, log: `Vector DB: Hybrid Search (${tenantId})`,
-    inspectorData: { 
-      title: 'Hybrid Search (HNSW + BM25)', 
-      description: 'Why: "HybridRAG combines semantic similarity with keyword fidelity." Retrieving top 50 candidates.', 
-      data: { dense_results: 40, sparse_results: 10, total_candidates: 50, latency_ms: 15, filter: { tenant_id: tenantId } } 
-    }
-  },
-  {
-    stepId: 5, node: 'reranker', edge: {from: 'vector_db', to: 'reranker'}, log: 'Reranker: Cross-Encoder Refinement',
-    inspectorData: { 
-      title: 'Cross-Encoder Re-ranking', 
-      description: 'Why: "The Secret Sauce." Highlighting score changes. Note how the "correct" document moves to the top.', 
-      visualType: 'ranking',
-      data: { 
-        model: "mixedbread-ai/mxbai-rerank-large-v1",
-        candidates: [
-          { id: "doc_88", text: `Vacation Policy (Tenant ${tenantId})`, old_rank: 14, new_rank: 1, score: 0.98 },
-          { id: "doc_12", text: "Paid Time Off Guidelines (General)", old_rank: 3, new_rank: 2, score: 0.89 },
-          { id: "doc_05", text: "Sick Leave Policy", old_rank: 1, new_rank: 3, score: 0.76 },
-          { id: "doc_99", text: "Remote Work (Reference)", old_rank: 2, new_rank: 4, score: 0.45 },
-          { id: "doc_34", text: "Office Holiday Party", old_rank: 4, new_rank: 5, score: 0.12 }
-        ]
-      } 
-    }
-  },
-  {
-    stepId: 6, node: 'llm', edge: {from: 'reranker', to: 'llm'}, log: 'LLM: Inference with FlashAttention',
-    inspectorData: { 
-      title: 'LLM Generation (CoT)', 
-      description: 'Why: Using Chain-of-Thought (CoT) to "force intermediate reasoning steps." FlashAttention speeds up the IO.', 
-      data: { technique: "CoT + RAG", system_prompt: "You are a helpful HR assistant...", context_chunks: 5 } 
-    }
-  },
-  {
-    stepId: 7, node: 'redis', edge: {from: 'llm', to: 'redis'}, log: 'Redis: Write-back History',
-    inspectorData: { 
-      title: 'State Update', 
-      description: 'Why: "KV Cache" concepts apply here for maintaining session context efficiently.', 
-      data: { action: "Append Turn", key: `chat:history:${tenantId}:u_99`, ttl: 3600 } 
-    }
-  },
-  {
-    stepId: 8, node: 'user', edge: {from: 'llm', to: 'user'}, log: 'User: Streaming Response',
-    inspectorData: { 
-      title: 'Final Output', 
-      description: 'Delivered via SSE (Server-Sent Events).', 
-      data: "Based on the policy, you have **20 days** of vacation." 
-    }
+  ];
+
+  // 2. Redis Hit Short-Circuit
+  if (isRedisHit) {
+    return [
+        ...baseSteps,
+        {
+          stepId: 2, node: 'user', edge: {from: 'redis', to: 'user'}, log: 'User: Received Cached Response',
+          inspectorData: {
+             title: 'Response Delivered',
+             description: 'Latency < 10ms. No LLM or Vector DB costs incurred.',
+             data: { source: "REDIS_CACHE", content: "Vacation policy is 20 days." }
+          }
+        }
+    ];
   }
-];
+
+  // 3. Standard Retrieval Path (Redis Miss)
+  const retrievalSteps: SimulationStepDef[] = [
+    {
+      stepId: 2, node: 'postgres', edge: {from: 'redis', to: 'postgres'}, log: 'Postgres: Loading Long-term History',
+      inspectorData: { 
+        title: 'Permanent Storage (Layer 2)', 
+        description: 'Fetching full historical context from PostgreSQL. This is the "System of Record".', 
+        data: { query: "SELECT * FROM chat_logs WHERE user_id = 'u_99' LIMIT 10", found_records: 124 } 
+      }
+    },
+    {
+      stepId: 3, node: 'router', edge: {from: 'redis', to: 'router'}, log: 'Router: Analyzing Intent',
+      inspectorData: { 
+        title: 'Semantic Router (Classification)', 
+        description: 'Deciding the routing path. The model determines if the query requires Unstructured Search (Vector).', 
+        data: { intent: "unstructured_information", action: "ROUTE_TO_VECTOR_DB" } 
+      }
+    },
+    {
+      stepId: 4, node: 'retriever', edge: {from: 'router', to: 'retriever'}, log: 'Retriever: Generating HyDE Document',
+      inspectorData: { 
+        title: 'HyDE Strategy', 
+        description: 'Hallucinating an ideal answer to improve retrieval.', 
+        data: { method: "HyDE", hypothetical_doc: `The vacation policy for Tenant ${tenantId} typically allows...` } 
+      }
+    },
+    {
+      stepId: 5, node: 'embedding', edge: {from: 'retriever', to: 'embedding'}, log: 'Embedding: Vectorizing Query',
+      inspectorData: { 
+        title: 'Query Embedding', 
+        description: 'Embedding the hypothetical answer to find semantically similar REAL documents.', 
+        data: { vector_preview: [0.12, -0.55, 0.91] } 
+      }
+    },
+    {
+      stepId: 6, node: 'vector_db', edge: {from: 'embedding', to: 'vector_db'}, log: `Vector DB: Search`,
+      inspectorData: { 
+        title: 'Hybrid Search', 
+        description: 'Retrieving top candidates.', 
+        data: { total_candidates: 50, filter: { tenant_id: tenantId } } 
+      }
+    },
+    {
+      stepId: 7, node: 'reranker', edge: {from: 'vector_db', to: 'reranker'}, log: 'Reranker: Filtering',
+      inspectorData: { 
+        title: 'Cross-Encoder Re-ranking', 
+        description: 'Refining the top results.', 
+        visualType: 'ranking',
+        data: { 
+          model: "mixedbread-ai/mxbai-rerank-large-v1",
+          candidates: [
+            { id: "doc_88", text: `Vacation Policy (Tenant ${tenantId})`, old_rank: 14, new_rank: 1, score: 0.98 },
+            { id: "doc_12", text: "Paid Time Off Guidelines", old_rank: 3, new_rank: 2, score: 0.89 },
+          ]
+        } 
+      }
+    },
+    {
+        stepId: 8, node: 'llm', edge: {from: 'reranker', to: 'llm'}, log: 'LLM: Generating Initial Draft',
+        inspectorData: { 
+          title: 'LLM Generation Start', 
+          description: 'Model begins generating the answer.', 
+          data: { system_prompt: "You are a helpful HR assistant..." } 
+        }
+    }
+  ];
+
+  // 4. FLARE Branching
+  let flareSteps: SimulationStepDef[] = [];
+  if (isFlareEnabled) {
+      flareSteps = [
+        {
+            stepId: 9, node: 'retriever', edge: {from: 'llm', to: 'retriever'}, log: 'FLARE: Low Confidence Detected!',
+            inspectorData: { 
+              title: 'FLARE Triggered (Active Retrieval)', 
+              description: 'The LLM paused generation because confidence dropped below threshold for the term "sick leave days".', 
+              data: { 
+                  current_generation: "Vacation is 20 days, but sick leave is [CONFIDENCE_LOW]...",
+                  action: "PAUSE_AND_RETRIEVE",
+                  generated_query: "sick leave days count"
+              } 
+            }
+        },
+        {
+            stepId: 10, node: 'vector_db', edge: {from: 'retriever', to: 'vector_db'}, log: 'FLARE: Targeted Retrieval',
+            inspectorData: { 
+              title: 'Targeted Look-up', 
+              description: 'Fetching specific data for the missing term.', 
+              data: { query: "sick leave days count", result: "Sick Leave = 10 days" } 
+            }
+        },
+        {
+            stepId: 11, node: 'llm', edge: {from: 'vector_db', to: 'llm'}, log: 'LLM: Resuming Generation',
+            inspectorData: { 
+              title: 'Generation Resumed', 
+              description: 'Incorporating new evidence into the response.', 
+              data: { final_segment: "...sick leave is 10 days per year." } 
+            }
+        }
+      ];
+  }
+
+  // 5. Finalize
+  const nextStepId = 8 + (isFlareEnabled ? 3 : 0) + 1;
+  const finalSteps: SimulationStepDef[] = [
+    {
+      stepId: nextStepId, node: 'postgres', edge: {from: 'llm', to: 'postgres'}, log: 'Postgres: Archiving',
+      inspectorData: { 
+        title: 'Persistent Archive', 
+        description: 'Writing interaction to logs.', 
+        data: { action: "INSERT", table: "chat_logs" } 
+      }
+    },
+    {
+      stepId: nextStepId + 1, node: 'user', edge: {from: 'llm', to: 'user'}, log: 'User: Final Response',
+      inspectorData: { 
+        title: 'Final Output', 
+        description: 'Delivered via SSE.', 
+        data: "Based on the policy, you have **20 days** of vacation and **10 days** of sick leave." 
+      }
+    }
+  ];
+
+  return [...baseSteps, ...retrievalSteps, ...flareSteps, ...finalSteps];
+};
 
 const TENANTS = ['T-800', 'Cyberdyne', 'Massive Dynamic', 'Acme Corp'];
 
@@ -145,6 +227,10 @@ const App: React.FC = () => {
   const [userQuery, setUserQuery] = useState('What is the vacation policy?');
   const [selectedTenant, setSelectedTenant] = useState('T-800');
   
+  // Toggles
+  const [simulateRedisHit, setSimulateRedisHit] = useState(false);
+  const [enableFlare, setEnableFlare] = useState(false);
+
   // Simulation State
   const [simulationMode, setSimulationMode] = useState<'ingestion' | 'query' | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(-1);
@@ -165,13 +251,20 @@ const App: React.FC = () => {
     setActiveFlow(mode);
     setConsoleLogs([]);
     log(`Starting ${mode.toUpperCase()} pipeline simulation for ${selectedTenant}...`);
+    if(mode === 'query') {
+        if(simulateRedisHit) log('[CONFIG] Redis Cache Hit Simulation: ON');
+        if(enableFlare) log('[CONFIG] FLARE Active Retrieval: ON');
+    }
+
     setInspectorData(null);
-    setRerankVideoUrl(null); // Reset reranker video on new flow
+    setRerankVideoUrl(null); 
     advanceStep(mode, 0); 
   };
 
   const advanceStep = (mode: 'ingestion' | 'query', stepIdx: number) => {
-    const steps = mode === 'ingestion' ? getIngestionSteps(selectedTenant) : getQuerySteps(selectedTenant);
+    const steps = mode === 'ingestion' 
+        ? getIngestionSteps(selectedTenant) 
+        : getQuerySteps(selectedTenant, simulateRedisHit, enableFlare);
     
     if (stepIdx >= steps.length) {
       log('Simulation Complete.');
@@ -194,7 +287,7 @@ const App: React.FC = () => {
     log(step.log);
     setInspectorData(step.inspectorData);
 
-    if (mode === 'query' && step.node === 'llm') {
+    if (mode === 'query' && step.node === 'llm' && !simulateRedisHit) {
       callGemini();
     }
   };
@@ -223,7 +316,6 @@ const App: React.FC = () => {
 
   // Dedicated handler for the Reranker node video
   const handleGenerateRerankVideo = async () => {
-      // Access global aistudio safely
       const aistudio = (window as any).aistudio;
       if (aistudio && aistudio.hasSelectedApiKey) {
           const hasKey = await aistudio.hasSelectedApiKey();
@@ -239,7 +331,7 @@ const App: React.FC = () => {
       const prompt = "A clean, high-tech animated bar chart showing document scores re-ordering. Bars start in random order, then smoothly slide up and down to sort themselves by length (score). Green color scheme, dark background, data visualization style.";
 
       try {
-          const videoUrl = await generateVeoVideo(prompt, undefined, '16:9'); // No image needed, prompt-based
+          const videoUrl = await generateVeoVideo(prompt, undefined, '16:9'); 
           if (videoUrl) {
               setRerankVideoUrl(videoUrl);
               log('Rerank visualization generated.');
@@ -294,10 +386,10 @@ const App: React.FC = () => {
         <div className="lg:col-span-8 p-6 flex flex-col gap-6 overflow-y-auto">
           
           {/* Controls Bar */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row gap-4 items-center justify-between shadow-sm">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-4 shadow-sm">
             
-            {/* Input Area */}
-            <div className="flex-1 w-full md:w-auto">
+            {/* Top Row: Query Input */}
+            <div className="w-full">
               <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">User Query Simulation</label>
               <input 
                 type="text" 
@@ -309,42 +401,76 @@ const App: React.FC = () => {
               />
             </div>
 
-            {/* Action Buttons */}
-            <div className="flex gap-2 items-end">
-              {!simulationMode ? (
-                <>
-                  <button 
-                    onClick={() => startSimulation('ingestion')}
-                    className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-lg transition border border-slate-700"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                    Ingestion Flow
-                  </button>
-                  <button 
-                    onClick={() => startSimulation('query')}
-                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition shadow-lg shadow-blue-900/20"
-                  >
-                    <Play className="w-4 h-4 fill-current" />
-                    Query Flow
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button 
-                    onClick={handleNextStep}
-                    className="flex items-center gap-2 px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold rounded-lg transition shadow-lg shadow-emerald-900/20 animate-pulse-fast"
-                  >
-                    Next Step <ChevronRight className="w-4 h-4" />
-                  </button>
-                   <button 
-                    onClick={resetSimulation}
-                    className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition"
-                    title="Reset"
-                  >
-                    <RotateCcw className="w-5 h-5" />
-                  </button>
-                </>
-              )}
+            {/* Bottom Row: Toggles & Actions */}
+            <div className="flex flex-col md:flex-row gap-4 items-center justify-between border-t border-slate-800 pt-3">
+                 {/* Feature Toggles */}
+                 <div className="flex items-center gap-3">
+                    <button 
+                        onClick={() => !simulationMode && setSimulateRedisHit(!simulateRedisHit)}
+                        disabled={simulationMode !== null}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
+                            simulateRedisHit 
+                                ? 'bg-red-900/30 border-red-500 text-red-300' 
+                                : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Simulate a Redis Cache Hit (skips retrieval)"
+                    >
+                        <Zap className={`w-3.5 h-3.5 ${simulateRedisHit ? 'fill-current' : ''}`} />
+                        Redis Hit
+                    </button>
+
+                    <button 
+                        onClick={() => !simulationMode && setEnableFlare(!enableFlare)}
+                        disabled={simulationMode !== null || simulateRedisHit}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
+                            enableFlare 
+                                ? 'bg-indigo-900/30 border-indigo-500 text-indigo-300' 
+                                : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+                        } ${simulateRedisHit ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        title="Enable FLARE (Self-Correcting Active Retrieval)"
+                    >
+                        <RefreshCcw className={`w-3.5 h-3.5 ${enableFlare ? 'animate-spin-slow' : ''}`} />
+                        FLARE Mode
+                    </button>
+                 </div>
+
+                 {/* Action Buttons */}
+                 <div className="flex gap-2">
+                    {!simulationMode ? (
+                        <>
+                        <button 
+                            onClick={() => startSimulation('ingestion')}
+                            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-lg transition border border-slate-700"
+                        >
+                            <RefreshCw className="w-4 h-4" />
+                            Ingestion
+                        </button>
+                        <button 
+                            onClick={() => startSimulation('query')}
+                            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition shadow-lg shadow-blue-900/20"
+                        >
+                            <Play className="w-4 h-4 fill-current" />
+                            Start Query
+                        </button>
+                        </>
+                    ) : (
+                        <>
+                        <button 
+                            onClick={handleNextStep}
+                            className="flex items-center gap-2 px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold rounded-lg transition shadow-lg shadow-emerald-900/20 animate-pulse-fast"
+                        >
+                            Next Step <ChevronRight className="w-4 h-4" />
+                        </button>
+                        <button 
+                            onClick={resetSimulation}
+                            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition"
+                            title="Reset"
+                        >
+                            <RotateCcw className="w-5 h-5" />
+                        </button>
+                        </>
+                    )}
+                 </div>
             </div>
           </div>
 
@@ -354,7 +480,7 @@ const App: React.FC = () => {
                <h2 className="text-sm font-semibold text-slate-400">Architecture Diagram</h2>
                {simulationMode && (
                  <span className="text-xs bg-emerald-900/30 text-emerald-400 px-2 py-0.5 rounded border border-emerald-800">
-                    Step {currentStepIndex + 1} / {simulationMode === 'ingestion' ? getIngestionSteps(selectedTenant).length : getQuerySteps(selectedTenant).length}
+                    Step {currentStepIndex + 1} / {simulationMode === 'ingestion' ? getIngestionSteps(selectedTenant).length : getQuerySteps(selectedTenant, simulateRedisHit, enableFlare).length}
                  </span>
                )}
              </div>

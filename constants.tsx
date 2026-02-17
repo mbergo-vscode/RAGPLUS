@@ -1,4 +1,4 @@
-import { Database, Server, Cpu, Layers, MessageSquare, User, FileText, Zap, BrainCircuit, Filter } from 'lucide-react';
+import { Database, Server, Cpu, Layers, MessageSquare, User, FileText, Zap, BrainCircuit, Filter, HardDrive, GitFork, Table } from 'lucide-react';
 import { PipelineNodeDef, PipelineEdgeDef, NodeDetail } from './types';
 
 // Coordinates optimized for a 1200x500 layout
@@ -12,8 +12,14 @@ export const NODES: PipelineNodeDef[] = [
   
   // Query Row (Top)
   { id: 'user', label: 'User Client', x: 50, y: 100, icon: User, description: 'Interface', category: 'query' },
-  { id: 'redis', label: 'Redis Memory', x: 250, y: 100, icon: Server, description: 'History & Cache', category: 'storage' },
-  { id: 'retriever', label: 'Retriever', x: 450, y: 100, icon: Cpu, description: 'Orchestrator', category: 'query' },
+  { id: 'redis', label: 'Redis Memory', x: 200, y: 100, icon: Server, description: 'Hot Cache', category: 'storage' },
+  { id: 'postgres', label: 'PostgreSQL', x: 200, y: 225, icon: HardDrive, description: 'History / Record', category: 'storage' },
+  
+  // Routing & Logic
+  { id: 'router', label: 'Query Router', x: 350, y: 100, icon: GitFork, description: 'Semantic Routing', category: 'query' },
+  { id: 'sql_db', label: 'SQL DB', x: 350, y: 225, icon: Table, description: 'Structured Data', category: 'storage' },
+
+  { id: 'retriever', label: 'Retriever', x: 500, y: 100, icon: Cpu, description: 'Orchestrator', category: 'query' },
   { id: 'reranker', label: 'Reranker', x: 650, y: 100, icon: Filter, description: 'Precision Filtering', category: 'query' },
   { id: 'llm', label: 'LLM (Gemini)', x: 850, y: 100, icon: MessageSquare, description: 'Generation', category: 'query' },
 ];
@@ -27,14 +33,29 @@ export const EDGES: PipelineEdgeDef[] = [
   
   // Query Flow
   { from: 'user', to: 'redis', label: '1. Check Cache', activeInFlow: 'query', payloadInfo: 'JSON: { query, tenant_id }' },
-  { from: 'redis', to: 'retriever', label: '2. History', activeInFlow: 'query', payloadInfo: 'List[ChatHistoryItem]' },
-  { from: 'retriever', to: 'embedding', label: '3. Embed', activeInFlow: 'query', payloadInfo: 'HyDE String' },
+  { from: 'redis', to: 'postgres', label: '2. History', activeInFlow: 'query', payloadInfo: 'SQL: SELECT * FROM chat_logs' },
+  { from: 'postgres', to: 'redis', label: 'Hydrate', activeInFlow: 'query', payloadInfo: 'Sync Recent Context' },
+  
+  // Routing Steps
+  { from: 'redis', to: 'router', label: '3. Classify', activeInFlow: 'query', payloadInfo: 'Input: Query + History' },
+  { from: 'router', to: 'retriever', label: 'Semantic Path', activeInFlow: 'query', payloadInfo: 'Decision: Unstructured Search' },
+  { from: 'router', to: 'sql_db', label: 'SQL Path', activeInFlow: 'query', payloadInfo: 'Decision: Structured Query' },
+  
+  // Vector Path
+  { from: 'retriever', to: 'embedding', label: '4. Embed', activeInFlow: 'query', payloadInfo: 'HyDE String' },
   { from: 'embedding', to: 'retriever', label: 'Vector', activeInFlow: 'query', payloadInfo: 'Vector[768]' },
-  { from: 'retriever', to: 'vector_db', label: '4. ANN Search', activeInFlow: 'query', payloadInfo: 'KNN Query + Filters' },
-  { from: 'vector_db', to: 'reranker', label: '5. Raw Results', activeInFlow: 'query', payloadInfo: 'List[ScoredPoint] (Top 100)' }, 
-  { from: 'reranker', to: 'llm', label: '6. Top K', activeInFlow: 'query', payloadInfo: 'Context Window (Top 5)' },
-  { from: 'llm', to: 'redis', label: '7. Write-back', activeInFlow: 'query', payloadInfo: 'New Turn Object' },
-  { from: 'llm', to: 'user', label: '8. Stream', activeInFlow: 'query', payloadInfo: 'SSE / Markdown Stream' },
+  { from: 'retriever', to: 'vector_db', label: '5. Search', activeInFlow: 'query', payloadInfo: 'KNN Query + Filters' },
+  { from: 'vector_db', to: 'reranker', label: '6. Candidates', activeInFlow: 'query', payloadInfo: 'List[ScoredPoint] (Top 100)' }, 
+  { from: 'reranker', to: 'llm', label: '7. Top K', activeInFlow: 'query', payloadInfo: 'Context Window (Top 5)' },
+  
+  // SQL Path
+  { from: 'sql_db', to: 'llm', label: 'Table Rows', activeInFlow: 'query', payloadInfo: 'JSON: Table Result Set' },
+
+  // FLARE Loop (LLM -> Retriever) - Representing Active Retrieval
+  { from: 'llm', to: 'retriever', label: 'FLARE Loop', activeInFlow: 'query', payloadInfo: 'Trigger: Low Confidence Token' },
+
+  { from: 'llm', to: 'postgres', label: '8. Persist', activeInFlow: 'query', payloadInfo: 'INSERT INTO chat_logs' },
+  { from: 'llm', to: 'user', label: '9. Stream', activeInFlow: 'query', payloadInfo: 'SSE / Markdown Stream' },
 ];
 
 export const NODE_DETAILS: Record<string, NodeDetail> = {
@@ -111,26 +132,79 @@ Dense finds "conceptual" matches; Sparse finds "exact" matches. Hybrid systems u
   },
   redis: {
     title: 'Redis (Memory & Cache)',
-    subtitle: 'KV Cache & Conversation Store',
-    content: `Serves as the **Short-term Memory**.
+    subtitle: 'Hot Cache Layer',
+    content: `Serves as the **Short-term Memory** and **Semantic Cache**.
+
+**Why Separate from Postgres?**
+Speed. Retrieving context from Redis takes <1ms.
 
 **Roles**:
-1.  **Conversation History**: Stores the last $N$ turns. Essential for multi-turn reasoning.
-2.  **Semantic Cache**: Maps \`Query Vector\` -> \`Cached Response\`.
-3.  **Symbolic Memory**: Can store a lightweight Knowledge Graph (KG) for entity relationships (nodes/edges).`,
-    algorithms: ['LRU Eviction', 'Semantic Hashing', 'Graph Traversal'],
-    techStack: ['Redis Stack', 'Redis Graph']
+1.  **Session Cache**: Stores the active conversation turns.
+2.  **Semantic Cache**: Maps \`Query Vector\` -> \`Cached Response\` to save LLM costs.
+3.  **Write-Behind**: Buffers new chat logs before they are bulk-inserted into Postgres.`,
+    algorithms: ['LRU Eviction', 'Semantic Hashing', 'Write-Behind Buffer'],
+    techStack: ['Redis Stack', 'Memcached']
+  },
+  postgres: {
+    title: 'PostgreSQL',
+    subtitle: 'Permanent History & Compliance',
+    content: `The **System of Record** for all historical data.
+
+**Why is it needed?**
+While Redis is fast, it's volatile (or expensive for massive storage). Postgres provides:
+1.  **Long-term Retention**: Storing chat history for years (Audit logs).
+2.  **Analytics**: "Which documents are cited most often?"
+3.  **Structured Data**: User profiles, Tenant permissions, and Billing usage.
+
+**Integration**: 
+We use **pgvector** here as a secondary vector store or simply JSONB columns for flexible chat log storage.`,
+    algorithms: ['B-Tree Indexing', 'MVCC (Concurrency)', 'WAL (Write-Ahead Logging)'],
+    techStack: ['PostgreSQL', 'Supabase', 'Neon']
+  },
+  router: {
+    title: 'Query Router (Agentic)',
+    subtitle: 'Intent Classification & Routing',
+    content: `The "Traffic Cop" of the architecture. It decides WHERE to send the query.
+    
+**The Logic**:
+Not all queries need vector search. 
+*   "How many employees in NYC?" -> **SQL DB** (Structured)
+*   "What is the remote work policy?" -> **Vector DB** (Unstructured)
+
+**How it works**:
+We use a small, fast LLM (or a BERT classifier) to classify the query into an intent.
+*   **Semantic Routing**: Using embedding similarity to predefined "routes" (e.g., if query vector is close to "analytics" vector, route to SQL).
+*   **LLM Classifier**: A simple prompt: "Is this query asking for a specific number/table or a text explanation? Output: SQL or VECTOR".`,
+    algorithms: ['Zero-Shot Classification', 'Semantic Routing (Embedding-based)', 'Function Calling (Tool Use)'],
+    techStack: ['Gemini Flash (Fast)', 'HuggingFace Zero-Shot', 'LangChain Router']
+  },
+  sql_db: {
+    title: 'SQL Database',
+    subtitle: 'Structured Data & Text-to-SQL',
+    content: `Handles structured analytics queries that Vector DBs struggle with.
+
+**Text-to-SQL Pipeline**:
+1.  **Schema Retrieval**: The LLM gets the table schema (e.g., \`employees(id, location, salary)\`).
+2.  **SQL Generation**: The LLM converts "Count employees in NYC" to \`SELECT COUNT(*) FROM employees WHERE location = 'NYC'\`.
+3.  **Execution**: The database executes the SQL.
+4.  **Response**: The raw rows are sent back to the main LLM to generate a natural language summary.
+
+**Why this is hard**:
+Hallucinating column names is a common issue. We use techniques like **Schema Pruning** to only show relevant tables to the LLM.`,
+    algorithms: ['Text-to-SQL', 'Query Validation', 'Schema Pruning'],
+    techStack: ['PostgreSQL', 'Snowflake', 'BigQuery']
   },
   retriever: {
     title: 'Retriever',
-    subtitle: 'Orchestration (HyDE, Hybrid, GraphRAG)',
+    subtitle: 'Orchestration (FLARE, HyDE, GraphRAG)',
     content: `The brain of search logic.
 
-**Advanced Techniques (from PDF)**:
+**Advanced Techniques**:
+*   **FLARE (Forward-Looking Active Retrieval)**: Solves hallucinations. The LLM monitors its own confidence (logits) while generating. If confidence drops below a threshold for a specific term/sentence, it pauses, generates a search query for that specific missing info, retrieves it, and then resumes generation.
 *   **HyDE (Hypothetical Document Embeddings)**: LLM generates a fake answer, we embed *that* to find real docs. Improves retrieval for vague queries.
 *   **HybridRAG**: Combines Vector Search (Semantic) + **GraphRAG** (Knowledge Graph relationships). Best when "relationships matter" (legal/medical).
-*   **FLARE**: Active retrieval. The model monitors its own uncertainty and triggers retrieval *mid-generation* if confused.`,
-    algorithms: ['HyDE', 'GraphRAG', 'Hybrid Search (Dense + Sparse)', 'Self-Querying'],
+*   **Self-Querying**: The Retriever uses an LLM to extract filters (e.g., "date > 2023") from the natural language query before searching.`,
+    algorithms: ['FLARE (Active Retrieval)', 'HyDE', 'GraphRAG', 'Hybrid Search', 'Self-Querying'],
     techStack: ['LangChain', 'LlamaIndex', 'Haystack']
   },
   reranker: {
